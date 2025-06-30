@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.RayCasterGame" parent="Theme.AppCompat.Light.NoActionBar">
+        <!-- You can add other style customizations here if needed. -->
+    </style>
+</resources>
