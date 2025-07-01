@@ -72,7 +72,6 @@ public class MainActivity extends AppCompatActivity {
     public class GameView extends View {
 
         private enum QualityLevel { HIGH, MEDIUM, LOW }
-        // --- NEW --- Added PAUSED state
         private enum GameState { MAIN_MENU, PLAYING, PAUSED, SETTINGS, AUTHORS, GAME_OVER }
         private GameState currentState = GameState.MAIN_MENU;
 
@@ -92,14 +91,16 @@ public class MainActivity extends AppCompatActivity {
         private Random random = new Random();
         private int level = 1;
         public List<Sprite> sprites = new ArrayList<>();
+        // --- STABILITY FIX: Deferred sprite adding to prevent ConcurrentModificationException ---
+        private List<Sprite> spritesToAdd = new ArrayList<>();
+
 
         private PointF moveVector = new PointF(0, 0);
 
-        // --- MODIFIED --- Reorganized UI elements for clarity
         private RectF playButton, settingsButton, authorsButton, backButton;
         private RectF fovUpButton, fovDownButton, sensUpButton, sensDownButton, qualityButton;
-        private RectF pauseButton; // For in-game pausing
-        private RectF resumeButton, quitButton; // For pause menu
+        private RectF pauseButton;
+        private RectF resumeButton, quitButton;
 
         private PointF joystickBase = new PointF();
         private PointF joystickKnob = new PointF();
@@ -118,13 +119,11 @@ public class MainActivity extends AppCompatActivity {
 
         private List<Texture> textures = new ArrayList<>();
 
-        // --- NEW --- For professional UI
         private Paint uiPaint, textPaint, titlePaint;
-        private int pressedButton = 0; // To show button press effect
+        private int pressedButton = 0;
 
         public GameView(Context context) {
             super(context);
-            // --- MODIFIED --- Initialize new Paint objects for UI
             paint = new Paint();
             paint.setAntiAlias(false);
 
@@ -175,11 +174,9 @@ public class MainActivity extends AppCompatActivity {
 
             backButton = new RectF(centerX - buttonWidth / 2, h - buttonHeight * 2.5f, centerX + buttonWidth / 2, h - buttonHeight * 1.5f);
 
-            // --- NEW --- Pause menu buttons
             resumeButton = new RectF(centerX - buttonWidth / 2, h/2 - buttonHeight, centerX + buttonWidth / 2, h/2);
             quitButton = new RectF(centerX - buttonWidth / 2, h/2 + buttonHeight * 0.3f, centerX + buttonWidth / 2, h/2 + buttonHeight * 1.3f);
 
-            // --- NEW --- In-game pause button
             int pauseSize = h / 15;
             pauseButton = new RectF(w - pauseSize * 1.5f, pauseSize * 0.5f, w - pauseSize * 0.5f, pauseSize * 1.5f);
 
@@ -193,7 +190,6 @@ public class MainActivity extends AppCompatActivity {
         }
 
         private void update() {
-            // --- MODIFIED --- Don't update game logic if paused
             if (currentState != GameState.PLAYING) return;
 
             if (shootTimer > 0) shootTimer--;
@@ -216,13 +212,18 @@ public class MainActivity extends AppCompatActivity {
                     sprites.remove(i);
                 }
             }
+
+            // --- STABILITY FIX: Safely add new sprites to the main list after the update loop ---
+            if (!spritesToAdd.isEmpty()) {
+                sprites.addAll(spritesToAdd);
+                spritesToAdd.clear();
+            }
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
 
-            // --- MODIFIED --- New drawing logic to handle overlays
             if (currentState == GameState.PLAYING || currentState == GameState.PAUSED || currentState == GameState.GAME_OVER) {
                 drawGame(canvas);
             }
@@ -236,7 +237,6 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // --- MODIFIED --- All menu drawing methods are now redesigned
         private void drawMainMenu(Canvas canvas) {
             canvas.drawColor(Color.rgb(20, 20, 30));
             titlePaint.setTextSize(150);
@@ -248,8 +248,8 @@ public class MainActivity extends AppCompatActivity {
         }
 
         private void drawSettings(Canvas canvas) {
-            drawGame(canvas); // Draw blurred background
-            canvas.drawColor(Color.argb(200, 10, 10, 20)); // Dark overlay
+            drawGame(canvas);
+            canvas.drawColor(Color.argb(200, 10, 10, 20));
 
             titlePaint.setTextSize(120);
             canvas.drawText("Settings", canvas.getWidth() / 2f, canvas.getHeight() / 5f, titlePaint);
@@ -283,9 +283,8 @@ public class MainActivity extends AppCompatActivity {
         }
 
         private void drawGameOver(Canvas canvas) {
-            canvas.drawColor(Color.argb(200, 100, 20, 20)); // Red overlay
+            canvas.drawColor(Color.argb(200, 100, 20, 20));
             titlePaint.setTextSize(150);
-            // --- FIXED --- Correctly center title text
             canvas.drawText("YOU DIED", canvas.getWidth() / 2f, canvas.getHeight() / 3f, titlePaint);
 
             textPaint.setTextSize(70);
@@ -296,9 +295,8 @@ public class MainActivity extends AppCompatActivity {
             canvas.drawText("Tap to return to Menu", canvas.getWidth() / 2f, canvas.getHeight() - 200, textPaint);
         }
 
-        // --- NEW --- Pause menu drawing method
         private void drawPauseMenu(Canvas canvas) {
-            canvas.drawColor(Color.argb(180, 10, 10, 20)); // Dark overlay
+            canvas.drawColor(Color.argb(180, 10, 10, 20));
             titlePaint.setTextSize(150);
             canvas.drawText("PAUSED", canvas.getWidth() / 2f, canvas.getHeight() / 3f, titlePaint);
 
@@ -314,16 +312,19 @@ public class MainActivity extends AppCompatActivity {
             paint.setColor(Color.rgb(80, 80, 80));
             canvas.drawRect(0, screenHeight / 2.0f, screenWidth, screenHeight, paint);
 
-            int rayStep = graphicsQuality == QualityLevel.LOW ? 4 : 2;
-            double fovRadians = Math.toRadians(fieldOfView / 2.0);
+            int rayStep = graphicsQuality == QualityLevel.LOW ? 4 : (graphicsQuality == QualityLevel.MEDIUM ? 2 : 1);
 
+            double fovRadians = Math.toRadians(fieldOfView / 2.0);
             double playerDirX = Math.cos(playerAngle);
             double playerDirY = Math.sin(playerAngle);
+            double planeX = -playerDirY * Math.tan(fovRadians);
+            double planeY = playerDirX * Math.tan(fovRadians);
+
 
             for (int x = 0; x < screenWidth; x += rayStep) {
                 double cameraX = 2.0 * x / screenWidth - 1.0;
-                double rayDirX = playerDirX + Math.cos(playerAngle + Math.PI / 2) * cameraX * Math.tan(fovRadians);
-                double rayDirY = playerDirY + Math.sin(playerAngle + Math.PI / 2) * cameraX * Math.tan(fovRadians);
+                double rayDirX = playerDirX + planeX * cameraX;
+                double rayDirY = playerDirY + planeY * cameraX;
 
                 int mapX = (int)playerPos.x;
                 int mapY = (int)playerPos.y;
@@ -406,12 +407,14 @@ public class MainActivity extends AppCompatActivity {
 
             switch(graphicsQuality) {
                 case HIGH:
-                    // --- FIXED --- Added bounds checking to prevent crash
+                    int texX = (int)(wallX * texture.width);
+                    // --- STABILITY FIX: Clamp texture X coordinate to prevent potential crash ---
+                    texX = Math.max(0, Math.min(texture.width - 1, texX));
+
                     for (int y = drawStart; y < drawEnd; y++) {
                         int d = y * 256 - getHeight() * 128 + lineHeight * 128;
                         int texY = ((d * texture.height) / lineHeight) / 256;
-                        texY = Math.max(0, Math.min(texture.height - 1, texY)); // Clamp to prevent crash
-                        int texX = (int)(wallX * texture.width);
+                        texY = Math.max(0, Math.min(texture.height - 1, texY));
                         int color = texture.getPixel(texX, texY);
                         int shadedColor = applyShading(color, distance, side);
                         paint.setColor(shadedColor);
@@ -434,6 +437,7 @@ public class MainActivity extends AppCompatActivity {
                     break;
             }
         }
+
 
         private int applyShading(int color, double distance, int side) {
             float flashIntensity = (shootTimer > 0) ? (float)Math.max(0, 1.0 - distance / 8.0) * (shootTimer / 10.0f) : 0;
@@ -462,6 +466,7 @@ public class MainActivity extends AppCompatActivity {
         private void generateLevel() {
             worldMap = new int[MAP_SIZE][MAP_SIZE];
             sprites.clear();
+            spritesToAdd.clear();
             for (int y = 0; y < MAP_SIZE; y++) {
                 for (int x = 0; x < MAP_SIZE; x++) {
                     worldMap[y][x] = 1;
@@ -571,8 +576,11 @@ public class MainActivity extends AppCompatActivity {
                     int screenWidth = getWidth();
                     int screenHeight = getHeight();
                     int spriteScreenXCenter = (int) (screenWidth / 2.0 * (1.0 + transformX / transformY));
-                    int spriteHeight = Math.abs((int) (screenHeight / transformY));
-                    int spriteWidth = spriteHeight;
+
+                    // --- IMPROVEMENT: Use sprite's scale property to adjust its size ---
+                    int spriteHeight = Math.abs((int) ((screenHeight / transformY) * s.scale));
+                    int spriteWidth = spriteHeight; // Assuming square sprites
+
                     float drawStartX = spriteScreenXCenter - spriteWidth / 2.0f;
                     float drawStartY = -spriteHeight / 2.0f + screenHeight / 2.0f;
 
@@ -599,7 +607,6 @@ public class MainActivity extends AppCompatActivity {
             paint.setColor(Color.DKGRAY);
             canvas.drawRect(getWidth() / 2f - gunWidth / 4f, getHeight() - gunHeight, getWidth() / 2f + gunWidth / 4f, getHeight(), paint);
 
-            // --- NEW --- Draw Pause Icon
             uiPaint.setColor(Color.argb(150, 255, 255, 255));
             float barWidth = pauseButton.width() / 5;
             canvas.drawRect(pauseButton.left + barWidth, pauseButton.top, pauseButton.left + barWidth * 2, pauseButton.bottom, uiPaint);
@@ -615,7 +622,6 @@ public class MainActivity extends AppCompatActivity {
             drawButtonWithText(canvas, shootButton, "SHOOT");
         }
 
-        // --- NEW --- Redesigned button drawing method
         private void drawStyledButton(Canvas canvas, RectF bounds, String text, int buttonId) {
             if (pressedButton == buttonId) {
                 uiPaint.setColor(Color.rgb(60, 60, 80));
@@ -643,19 +649,12 @@ public class MainActivity extends AppCompatActivity {
             canvas.drawText(text, bounds.centerX(), bounds.centerY() + 15, paint);
         }
 
-        private void drawTextCentered(Canvas canvas, String text, float y, float size, int color) {
-            textPaint.setTextSize(size);
-            textPaint.setColor(color);
-            canvas.drawText(text, canvas.getWidth() / 2f, y, textPaint);
-        }
-
         @Override
         public boolean onTouchEvent(MotionEvent event) {
             int action = event.getActionMasked();
 
-            // --- MODIFIED --- Handle new pause state and button press effect
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                pressedButton = 0; // Reset pressed button effect
+                pressedButton = 0;
             }
 
             if (currentState == GameState.PLAYING) {
@@ -701,7 +700,6 @@ public class MainActivity extends AppCompatActivity {
             if (backButton.contains(x, y)) { pressedButton = backButton.hashCode(); currentState = GameState.MAIN_MENU; }
         }
 
-        // --- NEW --- Touch handler for the pause menu
         private void handlePauseTouch(float x, float y) {
             if (resumeButton.contains(x,y)) { pressedButton = resumeButton.hashCode(); currentState = GameState.PLAYING; }
             if (quitButton.contains(x,y)) { pressedButton = quitButton.hashCode(); currentState = GameState.MAIN_MENU; }
@@ -712,8 +710,7 @@ public class MainActivity extends AppCompatActivity {
             int pointerIndex = event.getActionIndex();
             int pointerId = event.getPointerId(pointerIndex);
 
-            // --- MODIFIED --- Handle pause button press
-            if (action == MotionEvent.ACTION_DOWN) {
+            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
                 float x = event.getX(pointerIndex);
                 float y = event.getY(pointerIndex);
                 if (pauseButton.contains(x,y)) {
@@ -799,7 +796,6 @@ public class MainActivity extends AppCompatActivity {
         }
 
         public void resume() {
-            // Don't auto-resume if the game was paused by the user
             if (currentState != GameState.PAUSED) {
                 isPlaying = true;
                 handler.post(gameLoop);
@@ -862,6 +858,8 @@ public class MainActivity extends AppCompatActivity {
             public float x, y;
             public double distToPlayer = 0;
             public boolean isAlive = true;
+            // --- IMPROVEMENT: Add a scale property for resizing sprites like bullets ---
+            public float scale = 1.0f;
             public abstract void update();
             public abstract void draw(Canvas canvas, RectF screenRect, double[] depthBuffer, double correctedDist);
         }
@@ -882,7 +880,8 @@ public class MainActivity extends AppCompatActivity {
                     double angleToPlayer = Math.atan2(playerPos.y - y, playerPos.x - x);
                     float startX = x + (float)Math.cos(angleToPlayer) * 0.5f;
                     float startY = y + (float)Math.sin(angleToPlayer) * 0.5f;
-                    sprites.add(new Rocket(startX, startY, playerPos));
+                    // --- STABILITY FIX: Add to temporary list instead of modifying the main list directly ---
+                    spritesToAdd.add(new Rocket(startX, startY, playerPos));
                 }
             }
 
@@ -935,6 +934,8 @@ public class MainActivity extends AppCompatActivity {
             public Rocket(float startX, float startY, PointF target) {
                 this.x = startX;
                 this.y = startY;
+                // --- IMPROVEMENT: Set a smaller scale for the rocket sprite ---
+                this.scale = 0.3f;
                 double angle = Math.atan2(target.y - y, target.x - x);
                 float speed = 0.08f;
                 this.velX = (float) (Math.cos(angle) * speed);
@@ -963,6 +964,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void draw(Canvas canvas, RectF screenRect, double[] depthBuffer, double correctedDist) {
                 paint.setColor(Color.YELLOW);
+                // Clipping the drawing to the visible area on screen that is not obstructed by a wall
                 for (int i = (int)screenRect.left; i < (int)screenRect.right; i++) {
                     if (i >= 0 && i < depthBuffer.length && depthBuffer[i] > correctedDist) {
                         canvas.drawRect(i, screenRect.top, i + 1, screenRect.bottom, paint);
@@ -977,6 +979,7 @@ public class MainActivity extends AppCompatActivity {
             public void update() {
                 if(distToPlayer < 0.8f) {
                     level++;
+                    score += 100; // Reward for finishing level
                     generateLevel();
                 }
             }
