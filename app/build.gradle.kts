@@ -5,15 +5,15 @@ plugins {
 }
 
 android {
-    namespace = "com.example.raycastergame"
+    namespace = "com.example.doomcastergame"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.raycastergame"
+        applicationId = "com.example.doomcastergame"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "Beta 1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
