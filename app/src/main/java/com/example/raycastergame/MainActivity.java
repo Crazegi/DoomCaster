@@ -91,7 +91,6 @@ public class MainActivity extends AppCompatActivity {
         private Random random = new Random();
         private int level = 1;
         public List<Sprite> sprites = new ArrayList<>();
-        // --- STABILITY FIX: Deferred sprite adding to prevent ConcurrentModificationException ---
         private List<Sprite> spritesToAdd = new ArrayList<>();
 
 
@@ -116,11 +115,15 @@ public class MainActivity extends AppCompatActivity {
         private QualityLevel graphicsQuality = QualityLevel.MEDIUM;
 
         private int shootTimer = 0;
+        private static final int WEAPON_COOLDOWN_FRAMES = 10;
 
         private List<Texture> textures = new ArrayList<>();
 
         private Paint uiPaint, textPaint, titlePaint;
         private int pressedButton = 0;
+
+        private RectF reusableSpriteRect = new RectF();
+        private RectF reusableHealthBarRect = new RectF();
 
         public GameView(Context context) {
             super(context);
@@ -194,6 +197,13 @@ public class MainActivity extends AppCompatActivity {
 
             if (shootTimer > 0) shootTimer--;
 
+            for (Sprite s : sprites) {
+                s.distToPlayer = Math.hypot(playerPos.x - s.x, playerPos.y - s.y);
+            }
+            for (Sprite s : spritesToAdd) {
+                s.distToPlayer = Math.hypot(playerPos.x - s.x, playerPos.y - s.y);
+            }
+
             float moveSpeed = 0.05f;
             if (moveVector.length() > 0.01) {
                 float forwardX = (float)Math.cos(playerAngle) * moveVector.y * moveSpeed;
@@ -213,7 +223,6 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            // --- STABILITY FIX: Safely add new sprites to the main list after the update loop ---
             if (!spritesToAdd.isEmpty()) {
                 sprites.addAll(spritesToAdd);
                 spritesToAdd.clear();
@@ -408,7 +417,6 @@ public class MainActivity extends AppCompatActivity {
             switch(graphicsQuality) {
                 case HIGH:
                     int texX = (int)(wallX * texture.width);
-                    // --- STABILITY FIX: Clamp texture X coordinate to prevent potential crash ---
                     texX = Math.max(0, Math.min(texture.width - 1, texX));
 
                     for (int y = drawStart; y < drawEnd; y++) {
@@ -440,7 +448,7 @@ public class MainActivity extends AppCompatActivity {
 
 
         private int applyShading(int color, double distance, int side) {
-            float flashIntensity = (shootTimer > 0) ? (float)Math.max(0, 1.0 - distance / 8.0) * (shootTimer / 10.0f) : 0;
+            float flashIntensity = (shootTimer > 0) ? (float)Math.max(0, 1.0 - distance / 8.0) * (shootTimer / (float)WEAPON_COOLDOWN_FRAMES) : 0;
             int r = Color.red(color); int g = Color.green(color); int b = Color.blue(color);
             r = Math.min(255, (int)(r + 255 * flashIntensity));
             g = Math.min(255, (int)(g + 200 * flashIntensity));
@@ -502,9 +510,14 @@ public class MainActivity extends AppCompatActivity {
 
             for (int y = 1; y < MAP_SIZE - 1; y++) {
                 for (int x = 1; x < MAP_SIZE - 1; x++) {
-                    if (worldMap[y][x] == 0 && random.nextFloat() < 0.05) {
-                        sprites.add(new Enemy(x + 0.5f, y + 0.5f));
-                    } else if (worldMap[y][x] == 1) {
+                    if (worldMap[y][x] == 0) { // If it's an empty floor space
+                        // --- FEATURE: Medkit --- Spawn enemies and medkits
+                        if (random.nextFloat() < 0.05) { // 5% chance for an enemy
+                            sprites.add(new Enemy(x + 0.5f, y + 0.5f));
+                        } else if (random.nextFloat() < 0.02) { // 2% chance for a medkit
+                            sprites.add(new Medkit(x + 0.5f, y + 0.5f));
+                        }
+                    } else if (worldMap[y][x] == 1) { // If it's a generic wall
                         worldMap[y][x] = random.nextInt(textures.size() - 1) + 1;
                     }
                 }
@@ -529,17 +542,26 @@ public class MainActivity extends AppCompatActivity {
         }
 
         private void playerShoot() {
-            shootTimer = 10;
+            shootTimer = WEAPON_COOLDOWN_FRAMES;
 
             double eyeX = Math.cos(playerAngle); double eyeY = Math.sin(playerAngle);
             for (double d = 0; d < 20; d += 0.1) {
                 double testX = playerPos.x + eyeX * d; double testY = playerPos.y + eyeY * d;
-                if (worldMap[(int)testY][(int)testX] > 0) break;
+
+                // --- BUG FIX: Add bounds check to prevent ArrayOutOfBoundsException ---
+                int mapX = (int)testX;
+                int mapY = (int)testY;
+                if (mapX < 0 || mapX >= MAP_SIZE || mapY < 0 || mapY >= MAP_SIZE) {
+                    break; // Ray has gone out of bounds
+                }
+
+                if (worldMap[mapY][mapX] > 0) break; // Use checked coordinates for wall collision
+
                 for (Sprite s : sprites) {
                     if (s instanceof Enemy && s.isAlive && Math.hypot(s.x - testX, s.y - testY) < 0.5) {
                         ((Enemy) s).takeDamage(50);
                         score += 10;
-                        return;
+                        return; // Hit an enemy, stop the ray
                     }
                 }
             }
@@ -554,10 +576,15 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        private void drawSprites(Canvas canvas) {
-            for (Sprite s : sprites) {
-                s.distToPlayer = Math.hypot(playerPos.x - s.x, playerPos.y - s.y);
+        // --- FEATURE: Medkit --- Method to heal the player ---
+        public void playerHeal(int amount) {
+            playerHealth += amount;
+            if (playerHealth > 100) {
+                playerHealth = 100;
             }
+        }
+
+        private void drawSprites(Canvas canvas) {
             Collections.sort(sprites, (s1, s2) -> Double.compare(s2.distToPlayer, s1.distToPlayer));
 
             final double dirX = Math.cos(playerAngle);
@@ -577,36 +604,46 @@ public class MainActivity extends AppCompatActivity {
                     int screenHeight = getHeight();
                     int spriteScreenXCenter = (int) (screenWidth / 2.0 * (1.0 + transformX / transformY));
 
-                    // --- IMPROVEMENT: Use sprite's scale property to adjust its size ---
                     int spriteHeight = Math.abs((int) ((screenHeight / transformY) * s.scale));
-                    int spriteWidth = spriteHeight; // Assuming square sprites
+                    int spriteWidth = spriteHeight;
 
                     float drawStartX = spriteScreenXCenter - spriteWidth / 2.0f;
                     float drawStartY = -spriteHeight / 2.0f + screenHeight / 2.0f;
 
-                    RectF screenRect = new RectF(drawStartX, drawStartY, drawStartX + spriteWidth, drawStartY + spriteHeight);
+                    reusableSpriteRect.set(drawStartX, drawStartY, drawStartX + spriteWidth, drawStartY + spriteHeight);
                     double correctedDist = transformY;
-                    s.draw(canvas, screenRect, depthBuffer, correctedDist);
+                    s.draw(canvas, reusableSpriteRect, depthBuffer, correctedDist);
                 }
             }
         }
 
 
         private void drawGameUI(Canvas canvas) {
-            paint.setColor(Color.RED);
+            // Health bar background
+            paint.setColor(Color.rgb(80, 0, 0));
             canvas.drawRect(20, 20, 20 + 200, 60, paint);
-            paint.setColor(Color.GREEN);
+            // Health bar foreground
+            paint.setColor(Color.RED);
             canvas.drawRect(20, 20, 20 + (playerHealth * 2), 60, paint);
+            // Health text
+            textPaint.setTextSize(35);
+            textPaint.setTextAlign(Paint.Align.LEFT);
+            canvas.drawText("" + playerHealth, 25, 52, textPaint);
+
+            // Score and Level text
             paint.setColor(Color.WHITE);
             paint.setTextSize(50);
             paint.setTextAlign(Paint.Align.LEFT);
             canvas.drawText("Score: " + score, 20, 120, paint);
             canvas.drawText("Best: " + bestScore, 20, 180, paint);
             canvas.drawText("Lvl: " + level, 20, 240, paint);
+
+            // Gun
             int gunWidth = getWidth() / 4; int gunHeight = getHeight() / 3;
             paint.setColor(Color.DKGRAY);
             canvas.drawRect(getWidth() / 2f - gunWidth / 4f, getHeight() - gunHeight, getWidth() / 2f + gunWidth / 4f, getHeight(), paint);
 
+            // Pause Icon
             uiPaint.setColor(Color.argb(150, 255, 255, 255));
             float barWidth = pauseButton.width() / 5;
             canvas.drawRect(pauseButton.left + barWidth, pauseButton.top, pauseButton.left + barWidth * 2, pauseButton.bottom, uiPaint);
@@ -637,6 +674,7 @@ public class MainActivity extends AppCompatActivity {
             canvas.drawRoundRect(bounds, 20, 20, uiPaint);
 
             textPaint.setTextSize(bounds.height() * 0.4f);
+            textPaint.setTextAlign(Paint.Align.CENTER);
             canvas.drawText(text, bounds.centerX(), bounds.centerY() + (textPaint.getTextSize() / 3), textPaint);
         }
 
@@ -858,7 +896,6 @@ public class MainActivity extends AppCompatActivity {
             public float x, y;
             public double distToPlayer = 0;
             public boolean isAlive = true;
-            // --- IMPROVEMENT: Add a scale property for resizing sprites like bullets ---
             public float scale = 1.0f;
             public abstract void update();
             public abstract void draw(Canvas canvas, RectF screenRect, double[] depthBuffer, double correctedDist);
@@ -867,6 +904,10 @@ public class MainActivity extends AppCompatActivity {
         class Enemy extends Sprite {
             private int health = 100;
             private long lastShotTime = 0;
+            private static final long SHOT_COOLDOWN_MS = 2000;
+            private static final float LINE_OF_SIGHT_RANGE = 10.0f;
+            private static final float LINE_OF_SIGHT_STEP = 0.2f;
+
 
             public Enemy(float x, float y) {
                 this.x = x;
@@ -875,12 +916,11 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void update() {
-                if (distToPlayer < 10 && hasLineOfSight() && System.currentTimeMillis() - lastShotTime > 2000) {
+                if (distToPlayer < LINE_OF_SIGHT_RANGE && hasLineOfSight() && System.currentTimeMillis() - lastShotTime > SHOT_COOLDOWN_MS) {
                     lastShotTime = System.currentTimeMillis();
                     double angleToPlayer = Math.atan2(playerPos.y - y, playerPos.x - x);
                     float startX = x + (float)Math.cos(angleToPlayer) * 0.5f;
                     float startY = y + (float)Math.sin(angleToPlayer) * 0.5f;
-                    // --- STABILITY FIX: Add to temporary list instead of modifying the main list directly ---
                     spritesToAdd.add(new Rocket(startX, startY, playerPos));
                 }
             }
@@ -890,10 +930,18 @@ public class MainActivity extends AppCompatActivity {
                 double rayDirX = Math.cos(angleToPlayer);
                 double rayDirY = Math.sin(angleToPlayer);
 
-                for (double d = 0; d < distToPlayer; d += 0.2) {
+                for (double d = 0; d < distToPlayer; d += LINE_OF_SIGHT_STEP) {
                     float testX = (float)(x + rayDirX * d);
                     float testY = (float)(y + rayDirY * d);
-                    if (worldMap[(int)testY][(int)testX] > 0) {
+
+                    // --- BUG FIX: Add bounds check to prevent ArrayOutOfBoundsException ---
+                    int mapX = (int)testX;
+                    int mapY = (int)testY;
+                    if (mapX < 0 || mapX >= MAP_SIZE || mapY < 0 || mapY >= MAP_SIZE) {
+                        return false; // Path is blocked by going out of map
+                    }
+
+                    if (worldMap[mapY][mapX] > 0) { // Use checked coordinates
                         return false;
                     }
                 }
@@ -910,11 +958,12 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 float healthWidth = screenRect.width() * (health / 100f);
-                RectF healthBarRect = new RectF(screenRect.left, screenRect.top - 20, screenRect.left + healthWidth, screenRect.top - 10);
-                for (int i = (int)healthBarRect.left; i < (int)healthBarRect.right; i++) {
+                reusableHealthBarRect.set(screenRect.left, screenRect.top - 20, screenRect.left + healthWidth, screenRect.top - 10);
+
+                for (int i = (int)reusableHealthBarRect.left; i < (int)reusableHealthBarRect.right; i++) {
                     if (i >= 0 && i < depthBuffer.length && depthBuffer[i] > correctedDist) {
                         paint.setColor(Color.GREEN);
-                        canvas.drawRect(i, healthBarRect.top, i+1, healthBarRect.bottom, paint);
+                        canvas.drawRect(i, reusableHealthBarRect.top, i+1, reusableHealthBarRect.bottom, paint);
                     }
                 }
             }
@@ -930,25 +979,27 @@ public class MainActivity extends AppCompatActivity {
 
         class Rocket extends Sprite {
             private float velX, velY;
+            private static final float ROCKET_SPEED = 0.08f;
+            private static final float ROCKET_SCALE = 0.3f;
+            private static final float ROCKET_COLLISION_RADIUS = 0.5f;
+            private static final int ROCKET_DAMAGE = 10;
 
             public Rocket(float startX, float startY, PointF target) {
                 this.x = startX;
                 this.y = startY;
-                // --- IMPROVEMENT: Set a smaller scale for the rocket sprite ---
-                this.scale = 0.3f;
+                this.scale = ROCKET_SCALE;
                 double angle = Math.atan2(target.y - y, target.x - x);
-                float speed = 0.08f;
-                this.velX = (float) (Math.cos(angle) * speed);
-                this.velY = (float) (Math.sin(angle) * speed);
+                this.velX = (float) (Math.cos(angle) * ROCKET_SPEED);
+                this.velY = (float) (Math.sin(angle) * ROCKET_SPEED);
             }
 
             @Override
             public void update() {
                 x += velX;
                 y += velY;
-                if (Math.hypot(x - playerPos.x, y - playerPos.y) < 0.5) {
+                if (Math.hypot(x - playerPos.x, y - playerPos.y) < ROCKET_COLLISION_RADIUS) {
                     isAlive = false;
-                    GameView.this.takeDamage(10);
+                    GameView.this.takeDamage(ROCKET_DAMAGE);
                 }
                 int mapX = (int)this.x;
                 int mapY = (int)this.y;
@@ -964,7 +1015,6 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void draw(Canvas canvas, RectF screenRect, double[] depthBuffer, double correctedDist) {
                 paint.setColor(Color.YELLOW);
-                // Clipping the drawing to the visible area on screen that is not obstructed by a wall
                 for (int i = (int)screenRect.left; i < (int)screenRect.right; i++) {
                     if (i >= 0 && i < depthBuffer.length && depthBuffer[i] > correctedDist) {
                         canvas.drawRect(i, screenRect.top, i + 1, screenRect.bottom, paint);
@@ -974,12 +1024,14 @@ public class MainActivity extends AppCompatActivity {
         }
 
         class Portal extends Sprite {
+            private static final float PORTAL_ACTIVATION_DISTANCE = 0.8f;
+
             public Portal(float x, float y) { this.x = x; this.y = y; }
             @Override
             public void update() {
-                if(distToPlayer < 0.8f) {
+                if(distToPlayer < PORTAL_ACTIVATION_DISTANCE) {
                     level++;
-                    score += 100; // Reward for finishing level
+                    score += 100;
                     generateLevel();
                 }
             }
@@ -989,6 +1041,59 @@ public class MainActivity extends AppCompatActivity {
                     if (i >= 0 && i < depthBuffer.length && depthBuffer[i] > correctedDist) {
                         int c = (int)(Math.sin(System.currentTimeMillis() / 200.0) * 127 + 128);
                         paint.setColor(Color.rgb(c, 0, c));
+                        canvas.drawRect(i, screenRect.top, i + 1, screenRect.bottom, paint);
+                    }
+                }
+            }
+        }
+
+        // --- FEATURE: Medkit --- New sprite class for health packs ---
+        class Medkit extends Sprite {
+            private static final float ACTIVATION_DISTANCE = 0.6f;
+            private static final int HEAL_AMOUNT = 25;
+
+            public Medkit(float x, float y) {
+                this.x = x;
+                this.y = y;
+                this.scale = 0.4f; // Make medkits a bit smaller than a full wall tile
+            }
+
+            @Override
+            public void update() {
+                if (distToPlayer < ACTIVATION_DISTANCE) {
+                    GameView.this.playerHeal(HEAL_AMOUNT);
+                    isAlive = false; // Medkit is used up
+                }
+            }
+
+            @Override
+            public void draw(Canvas canvas, RectF screenRect, double[] depthBuffer, double correctedDist) {
+                // Draw Green Background
+                paint.setColor(Color.rgb(0, 150, 0));
+                for (int i = (int) screenRect.left; i < (int) screenRect.right; i++) {
+                    if (i >= 0 && i < depthBuffer.length && depthBuffer[i] > correctedDist) {
+                        canvas.drawRect(i, screenRect.top, i + 1, screenRect.bottom, paint);
+                    }
+                }
+
+                // Draw White Cross on top
+                paint.setColor(Color.WHITE);
+                float crossThickness = Math.max(2f, screenRect.width() / 4f);
+
+                // Horizontal bar
+                float horizTop = screenRect.centerY() - crossThickness / 2;
+                float horizBottom = screenRect.centerY() + crossThickness / 2;
+                for (int i = (int) screenRect.left; i < (int) screenRect.right; i++) {
+                    if (i >= 0 && i < depthBuffer.length && depthBuffer[i] > correctedDist) {
+                        canvas.drawRect(i, horizTop, i + 1, horizBottom, paint);
+                    }
+                }
+
+                // Vertical bar
+                float vertLeft = screenRect.centerX() - crossThickness / 2;
+                float vertRight = screenRect.centerX() + crossThickness / 2;
+                for (int i = (int) vertLeft; i < (int) vertRight; i++) {
+                    if (i >= 0 && i < depthBuffer.length && depthBuffer[i] > correctedDist) {
                         canvas.drawRect(i, screenRect.top, i + 1, screenRect.bottom, paint);
                     }
                 }
